@@ -1,0 +1,136 @@
+name: Build FF ESP APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      ANDROID_SDK_ROOT: /opt/android-sdk
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. JDK 17 ─────────────────────────────────────────────────────────
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ── 3. Patch local.properties + gradle.properties ─────────────────────
+      - name: Patch local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Patch gradle.properties
+        run: |
+          cat > gradle.properties << 'PROPS'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          PROPS
+
+      # ── 4. Android SDK manual install ─────────────────────────────────────
+      - name: Install Android cmdline-tools
+        run: |
+          sudo mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          wget -q \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+            -O /tmp/cmdtools.zip
+          sudo unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools_out
+          sudo mv /tmp/cmdtools_out/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools"           >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0"       >> $GITHUB_PATH
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT"             >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"         >> $GITHUB_ENV
+
+      - name: Accept licenses
+        run: yes | sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses || true
+
+      - name: Install SDK components
+        run: |
+          sdkmanager --sdk_root=$ANDROID_SDK_ROOT \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      # ── 5. Generate Gradle wrapper jar ────────────────────────────────────
+      - name: Generate Gradle wrapper jar
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip \
+            -O /tmp/gradle-bin.zip
+          unzip -q /tmp/gradle-bin.zip -d /tmp/gradle-cli
+          /tmp/gradle-cli/gradle-8.4/bin/gradle wrapper \
+            --gradle-version 8.4 \
+            --distribution-type bin \
+            -p .
+          ls -la gradle/wrapper/
+
+      # ── 6. gradlew permission ─────────────────────────────────────────────
+      - name: Fix gradlew permission
+        run: chmod +x gradlew
+
+      # ── 7. Build APK (unsigned) ───────────────────────────────────────────
+      - name: Build Release APK
+        run: |
+          ./gradlew assembleRelease \
+            --no-daemon \
+            --stacktrace
+
+      # ── 8. Sign APK ───────────────────────────────────────────────────────
+      - name: Decode keystore
+        run: |
+          echo "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" | base64 -d > ffesp.keystore
+
+      - name: Sign APK
+        run: |
+          $ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner sign \
+            --ks ffesp.keystore \
+            --ks-pass pass:ffesp1234 \
+            --key-pass pass:ffesp1234 \
+            --ks-key-alias ffesp \
+            --out app/build/outputs/apk/release/app-release-signed.apk \
+            app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Verify APK signature
+        run: |
+          $ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner verify \
+            --verbose \
+            app/build/outputs/apk/release/app-release-signed.apk
+
+      # ── 9. Upload artifact ────────────────────────────────────────────────
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FF-ESP-OB55
+          path: app/build/outputs/apk/release/app-release-signed.apk
+          retention-days: 30
+
+      # ── 10. GitHub Release (khi push tag v*) ──────────────────────────────
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: app/build/outputs/apk/release/app-release-signed.apk
+          name: FF ESP OB55 ${{ github.ref_name }}
+          body: |
+            ## FF ESP Overlay OB55
+            - Box đỏ quanh địch + corner accent
+            - Snapline vàng từ màn hình đến chân
+            - HP bar màu theo % máu
+            - Hiển thị khoảng cách
+            - Nút toggle kéo được
+            ### Cài
+            1. Tải APK
+            2. Bật cài từ nguồn không rõ
+            3. Cài → mở → cấp quyền Overlay
+            4. Nhấn MỞ FREE FIRE + BẬT ESP
